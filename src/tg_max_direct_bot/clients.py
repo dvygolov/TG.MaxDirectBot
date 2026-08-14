@@ -1,0 +1,320 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import mimetypes
+import ssl
+import time
+from pathlib import Path
+from typing import Any
+
+import httpx
+
+
+class ExternalAPIError(RuntimeError):
+    pass
+
+
+def _safe_error(service: str, response: httpx.Response) -> ExternalAPIError:
+    try:
+        data = response.json()
+        detail = data.get("description") or data.get("message") or data.get("code")
+    except (ValueError, AttributeError):
+        detail = None
+    suffix = f": {detail}" if detail else ""
+    return ExternalAPIError(f"{service} API вернул HTTP {response.status_code}{suffix}")
+
+
+class TelegramClient:
+    def __init__(self, token: str, base_url: str, timeout: float) -> None:
+        self.token = token
+        self.base_url = base_url.rstrip("/")
+        self.http = httpx.AsyncClient(timeout=timeout)
+
+    async def close(self) -> None:
+        await self.http.aclose()
+
+    async def _request(self, method: str, payload: dict[str, Any]) -> Any:
+        url = f"{self.base_url}/bot{self.token}/{method}"
+        try:
+            response = await self.http.post(url, json=payload)
+        except httpx.RequestError:
+            raise ExternalAPIError("сетевая ошибка Telegram API") from None
+        if response.is_error:
+            raise _safe_error("Telegram", response)
+        data = response.json()
+        if not data.get("ok"):
+            raise ExternalAPIError(
+                f"Telegram API отклонил запрос: {data.get('description', 'неизвестная ошибка')}"
+            )
+        return data.get("result")
+
+    async def get_me(self) -> dict[str, Any]:
+        return await self._request("getMe", {})
+
+    async def get_business_connection(self, connection_id: str) -> dict[str, Any]:
+        return await self._request(
+            "getBusinessConnection", {"business_connection_id": connection_id}
+        )
+
+    async def set_webhook(self, url: str, secret: str) -> bool:
+        return bool(
+            await self._request(
+                "setWebhook",
+                {
+                    "url": url,
+                    "secret_token": secret,
+                    "allowed_updates": ["business_connection", "business_message"],
+                },
+            )
+        )
+
+    async def get_webhook_info(self) -> dict[str, Any]:
+        return await self._request("getWebhookInfo", {})
+
+    async def send_text(
+        self,
+        *,
+        business_connection_id: str,
+        chat_id: int,
+        text: str,
+        reply_to_message_id: int,
+    ) -> dict[str, Any]:
+        return await self._request(
+            "sendMessage",
+            {
+                "business_connection_id": business_connection_id,
+                "chat_id": chat_id,
+                "text": text,
+                "reply_parameters": {
+                    "message_id": reply_to_message_id,
+                    "allow_sending_without_reply": True,
+                },
+            },
+        )
+
+    async def send_media(
+        self,
+        *,
+        business_connection_id: str,
+        chat_id: int,
+        media_type: str,
+        content: bytes,
+        filename: str,
+        mime_type: str | None,
+        caption: str | None,
+        reply_to_message_id: int,
+    ) -> dict[str, Any]:
+        methods = {
+            "image": ("sendPhoto", "photo"),
+            "video": ("sendVideo", "video"),
+            "audio": ("sendAudio", "audio"),
+            "file": ("sendDocument", "document"),
+        }
+        method, field = methods.get(media_type, methods["file"])
+        data: dict[str, str] = {
+            "business_connection_id": business_connection_id,
+            "chat_id": str(chat_id),
+            "reply_parameters": json.dumps(
+                {
+                    "message_id": reply_to_message_id,
+                    "allow_sending_without_reply": True,
+                }
+            ),
+        }
+        if caption:
+            data["caption"] = caption
+        guessed = mime_type or mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        files = {field: (filename, content, guessed)}
+        url = f"{self.base_url}/bot{self.token}/{method}"
+        try:
+            response = await self.http.post(url, data=data, files=files)
+        except httpx.RequestError:
+            raise ExternalAPIError("сетевая ошибка Telegram API при отправке файла") from None
+        if response.is_error:
+            raise _safe_error("Telegram", response)
+        payload = response.json()
+        if not payload.get("ok"):
+            raise ExternalAPIError(
+                f"Telegram API отклонил файл: {payload.get('description', 'неизвестная ошибка')}"
+            )
+        return payload["result"]
+
+    async def download_file(self, file_id: str, limit: int) -> tuple[bytes, str]:
+        info = await self._request("getFile", {"file_id": file_id})
+        file_path = str(info["file_path"])
+        url = f"{self.base_url}/file/bot{self.token}/{file_path}"
+        try:
+            async with self.http.stream("GET", url) as response:
+                if response.is_error:
+                    raise _safe_error("Telegram", response)
+                content = bytearray()
+                async for chunk in response.aiter_bytes():
+                    content.extend(chunk)
+                    if len(content) > limit:
+                        raise ExternalAPIError(
+                            f"файл Telegram превышает настроенный лимит {limit} байт"
+                        )
+        except httpx.RequestError:
+            raise ExternalAPIError("сетевая ошибка при скачивании файла Telegram") from None
+        return bytes(content), file_path
+
+
+class MaxClient:
+    def __init__(
+        self,
+        token: str,
+        base_url: str,
+        timeout: float,
+        ca_file: Path | None = None,
+    ) -> None:
+        self.token = token
+        self.base_url = base_url.rstrip("/")
+        context = ssl.create_default_context()
+        if ca_file is not None:
+            context.load_verify_locations(cafile=ca_file)
+        self.http = httpx.AsyncClient(
+            timeout=timeout,
+            verify=context,
+            headers={"Authorization": token},
+        )
+        self.media_http = httpx.AsyncClient(timeout=timeout, verify=context)
+        self._send_lock = asyncio.Lock()
+        self._last_send_at = 0.0
+
+    async def close(self) -> None:
+        await self.http.aclose()
+        await self.media_http.aclose()
+
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> Any:
+        try:
+            response = await self.http.request(
+                method,
+                f"{self.base_url}{path}",
+                params=params,
+                json=payload,
+            )
+        except httpx.RequestError:
+            raise ExternalAPIError("сетевая ошибка MAX API") from None
+        if response.is_error:
+            raise _safe_error("MAX", response)
+        data = response.json()
+        if isinstance(data, dict) and data.get("success") is False:
+            raise ExternalAPIError(
+                f"MAX API отклонил запрос: {data.get('message', 'неизвестная ошибка')}"
+            )
+        if isinstance(data, dict) and data.get("code"):
+            raise ExternalAPIError(
+                f"MAX API отклонил запрос: {data.get('code')}: "
+                f"{data.get('message', 'неизвестная ошибка')}"
+            )
+        return data
+
+    async def get_me(self) -> dict[str, Any]:
+        return await self._request("GET", "/me")
+
+    async def list_subscriptions(self) -> list[dict[str, Any]]:
+        data = await self._request("GET", "/subscriptions")
+        return list(data.get("subscriptions") or [])
+
+    async def delete_subscription(self, url: str) -> None:
+        await self._request("DELETE", "/subscriptions", params={"url": url})
+
+    async def create_subscription(self, url: str, secret: str) -> None:
+        await self._request(
+            "POST",
+            "/subscriptions",
+            payload={
+                "url": url,
+                "update_types": ["message_created", "bot_started"],
+                "secret": secret,
+            },
+        )
+
+    async def send_message(
+        self,
+        user_id: int,
+        text: str | None,
+        attachments: list[dict[str, Any]] | None = None,
+        *,
+        notify: bool = True,
+    ) -> dict[str, Any]:
+        async with self._send_lock:
+            wait = 0.52 - (time.monotonic() - self._last_send_at)
+            if wait > 0:
+                await asyncio.sleep(wait)
+            request_payload = {
+                "text": text,
+                "attachments": attachments or [],
+                "notify": notify,
+            }
+            for attempt in range(4):
+                try:
+                    data = await self._request(
+                        "POST",
+                        "/messages",
+                        params={"user_id": user_id},
+                        payload=request_payload,
+                    )
+                    break
+                except ExternalAPIError as exc:
+                    if not attachments or "attachment.not.ready" not in str(exc) or attempt == 3:
+                        raise
+                    await asyncio.sleep(2**attempt)
+            self._last_send_at = time.monotonic()
+            return data.get("message", data)
+
+    async def upload(self, media_type: str, content: bytes, filename: str) -> dict[str, Any]:
+        slot = await self._request("POST", "/uploads", params={"type": media_type})
+        upload_url = slot["url"]
+        mime = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        try:
+            response = await self.media_http.post(
+                upload_url,
+                files={"data": (filename, content, mime)},
+            )
+        except httpx.RequestError:
+            raise ExternalAPIError("сетевая ошибка при загрузке файла в MAX") from None
+        if response.is_error:
+            raise _safe_error("MAX upload", response)
+        uploaded = response.json()
+        if not isinstance(uploaded, dict):
+            raise ExternalAPIError("MAX upload вернул неожиданный ответ")
+        if "token" not in uploaded and "token" in slot:
+            uploaded["token"] = slot["token"]
+        return {"type": media_type, "payload": uploaded}
+
+    async def download_attachment(
+        self, attachment: dict[str, Any], limit: int
+    ) -> tuple[bytes, str, str | None]:
+        payload = attachment.get("payload") or {}
+        url = payload.get("url")
+        if not url:
+            urls = attachment.get("urls") or payload.get("urls") or {}
+            for key in ("mp4_1080", "mp4_720", "mp4_480", "mp4_360", "mp4_240"):
+                if urls.get(key):
+                    url = urls[key]
+                    break
+        if not url:
+            raise ExternalAPIError("во вложении MAX нет ссылки для скачивания")
+        try:
+            async with self.media_http.stream("GET", url) as response:
+                if response.is_error:
+                    raise _safe_error("MAX media", response)
+                content = bytearray()
+                async for chunk in response.aiter_bytes():
+                    content.extend(chunk)
+                    if len(content) > limit:
+                        raise ExternalAPIError(f"файл MAX превышает настроенный лимит {limit} байт")
+                content_type = response.headers.get("content-type")
+        except httpx.RequestError:
+            raise ExternalAPIError("сетевая ошибка при скачивании файла MAX") from None
+        filename = attachment.get("filename") or payload.get("filename") or "attachment"
+        return bytes(content), str(filename), content_type

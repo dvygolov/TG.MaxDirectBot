@@ -9,6 +9,7 @@ from .bridge import Bridge, PermanentEventError
 from .database import Database
 
 logger = logging.getLogger(__name__)
+WORKER_IDLE_TIMEOUT_SECONDS = 1.0
 
 
 class EventWorker:
@@ -36,8 +37,10 @@ class EventWorker:
             event = await self.db.claim_next()
             if event is None:
                 self._wake.clear()
-                with suppress(TimeoutError):
-                    await asyncio.wait_for(self._wake.wait(), timeout=1.0)
+                # On Python 3.9 asyncio.TimeoutError is not the built-in
+                # TimeoutError, so suppress the asyncio exception explicitly.
+                with suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(self._wake.wait(), timeout=WORKER_IDLE_TIMEOUT_SECONDS)
                 continue
             try:
                 if event.source == "telegram":

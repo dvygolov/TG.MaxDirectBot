@@ -15,13 +15,13 @@ Telegram приходит оператору в MAX. Оператор испол
 ```text
 Клиент пишет в личку Telegram
               ↓
-Telegram Business Bot → webhook → TG.MaxDirectBot → бот MAX → оператор
+Telegram Business Bot → polling/webhook → TG.MaxDirectBot → бот MAX → оператор
               ↑                                             ↓
               └──────── ответ через Business connection ────┘
 ```
 
-1. Telegram отправляет событие `business_message` на защищённый webhook.
-2. Приложение быстро сохраняет событие в SQLite и отвечает Telegram HTTP 200.
+1. Приложение получает `business_message` через long polling либо защищённый webhook.
+2. Событие сохраняется в SQLite до обработки.
 3. Фоновый обработчик пересылает сообщение оператору в MAX и сохраняет связь:
    `ID сообщения MAX → business_connection_id + чат + сообщение Telegram`.
 4. Оператор нажимает **«Ответить»** на карточке в MAX.
@@ -41,6 +41,8 @@ Telegram Business Bot → webhook → TG.MaxDirectBot → бот MAX → опе�
 - проверка секретов в заголовках Telegram и MAX webhook;
 - очередь событий в SQLite, повтор обработки после временной ошибки API;
 - дедупликация повторно доставленных webhook;
+- бездоменный long polling одновременно для Telegram и MAX;
+- сохранение Telegram offset и MAX marker в SQLite между перезапусками;
 - ограничение скорости отправки в MAX до двух сообщений в секунду;
 - автоматический HTTPS через Caddy и запуск одной командой Docker Compose;
 - CLI для проверки токенов и настройки обоих webhook;
@@ -56,6 +58,8 @@ Telegram Business Bot → webhook → TG.MaxDirectBot → бот MAX → опе�
   показывается.
 - Для создания бота MAX нужен верифицированный профиль организации, ИП или
   самозанятого — резидента РФ. Бот должен пройти модерацию.
+- MAX рекомендует webhook для production. Polling предназначен прежде всего для
+  разработки, первичного теста и небольших внутренних установок.
 - Стикеры, реакции, опросы, геопозиции, контакты, редактирование и удаление
   сообщений пока передаются только текстовой пометкой или не синхронизируются.
 - Облачный Telegram Bot API ограничивает скачивание файлов. Дополнительно проект
@@ -70,8 +74,9 @@ Telegram Business Bot → webhook → TG.MaxDirectBot → бот MAX → опе�
 
 ## Что понадобится
 
-- сервер с публичным IPv4/IPv6, доменом и открытыми портами 80/443;
-- Docker Engine и Docker Compose;
+- для polling: сервер с исходящим интернетом и Python 3.9+, домен не нужен;
+- для production webhook: публичный домен, HTTPS и порт 443;
+- Docker необязателен: поддерживаются обычный `.venv` + systemd и контейнер;
 - Telegram-бот, созданный через `@BotFather`;
 - бот MAX, созданный и прошедший модерацию на платформе MAX для партнёров;
 - числовой MAX ID оператора;
@@ -132,6 +137,45 @@ cd TG.MaxDirectBot
 cp .env.example .env
 ```
 
+### Вариант A: без домена, polling + systemd
+
+Для первичной проверки достаточно:
+
+```dotenv
+UPDATE_MODE=polling
+TELEGRAM_BOT_TOKEN=123456789:...
+MAX_BOT_TOKEN=...
+MAX_OPERATOR_USER_ID=123456789
+DATABASE_PATH=data/bridge.db
+POLLING_TIMEOUT_SECONDS=50
+```
+
+Установка отдельного окружения и сервиса:
+
+```bash
+chmod +x build.sh install-service.sh update.sh
+./build.sh
+./install-service.sh
+systemctl status tg-maxdirectbot.service
+journalctl -u tg-maxdirectbot.service -f
+```
+
+При старте polling-режим отключает Telegram webhook и удаляет активные webhook-
+подписки MAX, поскольку обе платформы не позволяют использовать webhook и long
+polling одновременно. Offset Telegram и marker MAX сохраняются в SQLite.
+
+Если Business Mode Telegram-бота ещё не включён, сервис стартует с предупреждением
+и продолжает опрашивать обе платформы. После включения режима в `@BotFather`
+перезапуск обычно не требуется.
+
+Обновление:
+
+```bash
+./update.sh
+```
+
+### Вариант B: production webhook + Docker/Caddy
+
 Сгенерируйте два независимых секрета webhook:
 
 ```bash
@@ -144,6 +188,7 @@ python -c "import secrets; print(secrets.token_urlsafe(32))"
 ```dotenv
 PUBLIC_BASE_URL=https://bot.example.ru
 DOMAIN=bot.example.ru
+UPDATE_MODE=webhook
 
 TELEGRAM_BOT_TOKEN=123456789:...
 TELEGRAM_WEBHOOK_SECRET=...
@@ -211,6 +256,12 @@ docker compose exec app tg-max-direct-bot check
 docker compose exec app tg-max-direct-bot setup-webhooks
 ```
 
+Для polling регистрировать webhook не нужно. Запуск вручную:
+
+```bash
+UPDATE_MODE=polling tg-max-direct-bot run-polling
+```
+
 Команда:
 
 - проверяет, что Telegram-бот имеет `can_connect_to_business`;
@@ -250,16 +301,19 @@ curl -fsS https://bot.example.ru/healthz
 
 | Переменная | Обязательна | Назначение |
 |---|---:|---|
-| `PUBLIC_BASE_URL` | да | Публичный HTTPS URL без завершающего `/` |
+| `UPDATE_MODE` | нет | `polling` без домена или `webhook`; по умолчанию `webhook` |
+| `PUBLIC_BASE_URL` | для webhook | Публичный HTTPS URL без завершающего `/` |
 | `DOMAIN` | для Caddy | Домен, на который Caddy получает сертификат |
 | `TELEGRAM_BOT_TOKEN` | да | Токен из `@BotFather` |
-| `TELEGRAM_WEBHOOK_SECRET` | да | Секрет заголовка Telegram webhook |
+| `TELEGRAM_WEBHOOK_SECRET` | для webhook | Секрет заголовка Telegram webhook |
 | `MAX_BOT_TOKEN` | да | Токен прошедшего модерацию бота MAX |
 | `MAX_OPERATOR_USER_ID` | да | Единственный MAX user ID, которому разрешено отвечать |
-| `MAX_WEBHOOK_SECRET` | да | Секрет заголовка MAX webhook |
+| `MAX_WEBHOOK_SECRET` | для webhook | Секрет заголовка MAX webhook |
 | `DATABASE_PATH` | нет | SQLite, по умолчанию `data/bridge.db` |
 | `LOG_LEVEL` | нет | `INFO`, `WARNING`, `DEBUG` и т. п. |
 | `HTTP_TIMEOUT_SECONDS` | нет | Тайм-аут внешних API, по умолчанию 30 секунд |
+| `POLLING_TIMEOUT_SECONDS` | нет | Тайм-аут long polling, 1–90 секунд; по умолчанию 50 |
+| `POLLING_DROP_PENDING_UPDATES` | нет | Удалить старые Telegram updates при первом переключении |
 | `MAX_DOWNLOAD_BYTES` | нет | Лимит переносимого файла, по умолчанию 20 МБ |
 | `SEND_CONFIRMATIONS` | нет | Отправлять в MAX подтверждение успешного ответа |
 | `MAX_CA_FILE` | нет | Дополнительный доверенный CA-файл для API MAX |
@@ -268,8 +322,8 @@ curl -fsS https://bot.example.ru/healthz
 
 ## Работа с очередью и данными
 
-Webhook не ждёт обращения к другому мессенджеру. Событие сначала записывается в
-SQLite, после чего сервер сразу возвращает HTTP 200. Фоновый обработчик выполняет
+Webhook и polling используют одну очередь. Событие сначала записывается в
+SQLite. Фоновый обработчик выполняет
 перенос и при временной ошибке повторяет попытку с увеличивающимся интервалом до
 пяти минут. Незавершённые события восстанавливаются после перезапуска.
 
@@ -279,6 +333,7 @@ SQLite, после чего сервер сразу возвращает HTTP 20
 - ID Telegram Business connection;
 - соответствия ID сообщений MAX и Telegram;
 - технические ошибки повторных попыток.
+- Telegram polling offset и MAX polling marker.
 
 Успешно обработанные события очереди автоматически удаляются через семь дней
 при следующем запуске. Сама переписка может оставаться в таблице событий до этой
@@ -296,7 +351,7 @@ docker compose start app
 
 ## Локальная разработка
 
-Требуется Python 3.11 или новее:
+Требуется Python 3.9 или новее:
 
 ```bash
 python -m venv .venv
@@ -313,9 +368,9 @@ ruff check .
 .venv\Scripts\Activate.ps1
 ```
 
-Для локального получения webhook всё равно нужен публичный HTTPS endpoint.
-Production-документация MAX рекомендует webhook; long polling проект намеренно не
-использует.
+Для локального polling публичный endpoint не нужен. Для webhook нужен HTTPS.
+Production-документация MAX рекомендует webhook; polling оставлен как удобный
+режим первоначальной проверки и небольшого внутреннего развёртывания.
 
 ## Диагностика
 
@@ -349,6 +404,13 @@ docker compose logs --tail=200 app
 docker compose logs -f app
 ```
 
+При установке через systemd:
+
+```bash
+journalctl -u tg-maxdirectbot.service --since today
+journalctl -u tg-maxdirectbot.service -f
+```
+
 Токены намеренно не выводятся в журнал. Не публикуйте логи, если в них есть имена,
 Telegram ID или содержимое обращений.
 
@@ -359,6 +421,8 @@ git pull --ff-only
 docker compose up -d --build
 docker compose exec app tg-max-direct-bot check
 ```
+
+Для systemd-установки: `./update.sh`.
 
 Перед крупным обновлением сделайте резервную копию `data/bridge.db`.
 

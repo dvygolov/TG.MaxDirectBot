@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-import hashlib
 import hmac
-import json
 import logging
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Optional
 
 from fastapi import FastAPI, Header, HTTPException, Request
 
@@ -13,22 +11,13 @@ from .bridge import Bridge
 from .clients import MaxClient, TelegramClient
 from .config import Settings, get_settings
 from .database import Database
+from .events import max_event_key
 from .worker import EventWorker
 
 logger = logging.getLogger(__name__)
 
 
-def _max_event_key(update: dict[str, Any]) -> str:
-    update_type = str(update.get("update_type") or "unknown")
-    message = update.get("message") or {}
-    mid = (message.get("body") or {}).get("mid")
-    if mid:
-        return f"{update_type}:{mid}"
-    canonical = json.dumps(update, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
-    return f"{update_type}:{hashlib.sha256(canonical.encode()).hexdigest()}"
-
-
-def create_app(settings: Settings | None = None) -> FastAPI:
+def create_app(settings: Optional[Settings] = None) -> FastAPI:
     settings = settings or get_settings()
     logging.basicConfig(
         level=getattr(logging, settings.log_level.upper(), logging.INFO),
@@ -71,7 +60,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(
         title="TG.MaxDirectBot",
-        version="0.1.0",
+        version="0.2.0",
         docs_url=None,
         redoc_url=None,
         lifespan=lifespan,
@@ -88,9 +77,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/webhooks/telegram")
     async def telegram_webhook(
         request: Request,
-        x_telegram_bot_api_secret_token: str | None = Header(default=None),
+        x_telegram_bot_api_secret_token: Optional[str] = Header(default=None),
     ) -> dict[str, bool]:
-        expected = settings.telegram_webhook_secret.get_secret_value()
+        expected = settings.telegram_webhook_secret_value
         if not x_telegram_bot_api_secret_token or not hmac.compare_digest(
             x_telegram_bot_api_secret_token, expected
         ):
@@ -107,13 +96,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/webhooks/max")
     async def max_webhook(
         request: Request,
-        x_max_bot_api_secret: str | None = Header(default=None),
+        x_max_bot_api_secret: Optional[str] = Header(default=None),
     ) -> dict[str, bool]:
-        expected = settings.max_webhook_secret.get_secret_value()
+        expected = settings.max_webhook_secret_value
         if not x_max_bot_api_secret or not hmac.compare_digest(x_max_bot_api_secret, expected):
             raise HTTPException(status_code=403, detail="invalid webhook secret")
         update = await request.json()
-        inserted = await database.enqueue("max", _max_event_key(update), update)
+        inserted = await database.enqueue("max", max_event_key(update), update)
         if inserted:
             worker.wake()
         return {"ok": True}

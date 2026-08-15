@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import suppress
+from typing import Optional
 
 from .bridge import Bridge, PermanentEventError
 from .database import Database
@@ -16,7 +17,7 @@ class EventWorker:
         self.bridge = bridge
         self._wake = asyncio.Event()
         self._stop = asyncio.Event()
-        self._task: asyncio.Task[None] | None = None
+        self._task: Optional[asyncio.Task[None]] = None
 
     def start(self) -> None:
         self._task = asyncio.create_task(self.run(), name="bridge-event-worker")

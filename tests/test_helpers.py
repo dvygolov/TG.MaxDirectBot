@@ -1,5 +1,5 @@
-from tg_max_direct_bot.app import _max_event_key
 from tg_max_direct_bot.bridge import _max_reply_mid, _split_for_max
+from tg_max_direct_bot.events import max_event_key
 
 
 def test_max_event_key_uses_message_id() -> None:
@@ -7,7 +7,7 @@ def test_max_event_key_uses_message_id() -> None:
         "update_type": "message_created",
         "message": {"body": {"mid": "abc-123"}},
     }
-    assert _max_event_key(update) == "message_created:abc-123"
+    assert max_event_key(update) == "message_created:abc-123"
 
 
 def test_reply_mid_comes_from_linked_message() -> None:

@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
 
 from .clients import MaxClient, TelegramClient
 from .config import Settings
+from .polling import run_polling
 
 
 async def _clients(settings: Settings) -> tuple[TelegramClient, MaxClient]:
@@ -33,7 +35,7 @@ async def setup_webhooks(settings: Settings) -> None:
             )
         await telegram.set_webhook(
             settings.telegram_webhook_url,
-            settings.telegram_webhook_secret.get_secret_value(),
+            settings.telegram_webhook_secret_value,
         )
 
         for subscription in await max_client.list_subscriptions():
@@ -41,7 +43,7 @@ async def setup_webhooks(settings: Settings) -> None:
                 await max_client.delete_subscription(settings.max_webhook_url)
         await max_client.create_subscription(
             settings.max_webhook_url,
-            settings.max_webhook_secret.get_secret_value(),
+            settings.max_webhook_secret_value,
         )
         print(f"Telegram webhook: {settings.telegram_webhook_url}")
         print(f"MAX webhook:      {settings.max_webhook_url}")
@@ -75,13 +77,19 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Управление TG.MaxDirectBot")
     parser.add_argument(
         "command",
-        choices=("setup-webhooks", "check"),
-        help="настроить webhook или проверить токены и подключения",
+        choices=("setup-webhooks", "run-polling", "check"),
+        help="настроить webhook, запустить polling или проверить подключения",
     )
     args = parser.parse_args()
     settings = Settings()  # type: ignore[call-arg]
+    logging.basicConfig(
+        level=getattr(logging, settings.log_level.upper(), logging.INFO),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
     if args.command == "setup-webhooks":
         asyncio.run(setup_webhooks(settings))
+    elif args.command == "run-polling":
+        asyncio.run(run_polling(settings))
     else:
         asyncio.run(check(settings))
 

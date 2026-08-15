@@ -6,12 +6,12 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import aiosqlite
 
 
-@dataclass(slots=True)
+@dataclass
 class QueuedEvent:
     id: int
     source: str
@@ -20,7 +20,7 @@ class QueuedEvent:
     attempts: int
 
 
-@dataclass(slots=True)
+@dataclass
 class TelegramTarget:
     business_connection_id: str
     chat_id: int
@@ -85,6 +85,12 @@ class Database:
 
                 CREATE INDEX IF NOT EXISTS idx_message_links_telegram
                     ON message_links(telegram_chat_id, telegram_message_id);
+
+                CREATE TABLE IF NOT EXISTS runtime_state (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at REAL NOT NULL
+                );
                 """
             )
             await db.execute(
@@ -117,7 +123,7 @@ class Database:
             await db.commit()
             return cursor.rowcount == 1
 
-    async def claim_next(self) -> QueuedEvent | None:
+    async def claim_next(self) -> Optional[QueuedEvent]:
         async with self.connect() as db:
             await db.execute("BEGIN IMMEDIATE")
             row = await (
@@ -199,7 +205,7 @@ class Database:
             )
             await db.commit()
 
-    async def get_business_user_id(self, connection_id: str) -> int | None:
+    async def get_business_user_id(self, connection_id: str) -> Optional[int]:
         async with self.connect() as db:
             row = await (
                 await db.execute(
@@ -234,7 +240,7 @@ class Database:
             )
             await db.commit()
 
-    async def get_telegram_target(self, max_message_id: str) -> TelegramTarget | None:
+    async def get_telegram_target(self, max_message_id: str) -> Optional[TelegramTarget]:
         async with self.connect() as db:
             row = await (
                 await db.execute(
@@ -253,3 +259,24 @@ class Database:
                 chat_id=int(row["telegram_chat_id"]),
                 message_id=int(row["telegram_message_id"]),
             )
+
+    async def get_state(self, key: str) -> Optional[str]:
+        async with self.connect() as db:
+            row = await (
+                await db.execute("SELECT value FROM runtime_state WHERE key = ?", (key,))
+            ).fetchone()
+            return str(row["value"]) if row else None
+
+    async def set_state(self, key: str, value: str) -> None:
+        async with self.connect() as db:
+            await db.execute(
+                """
+                INSERT INTO runtime_state (key, value, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    value = excluded.value,
+                    updated_at = excluded.updated_at
+                """,
+                (key, value, time.time()),
+            )
+            await db.commit()

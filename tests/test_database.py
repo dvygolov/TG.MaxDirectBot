@@ -16,3 +16,14 @@ async def test_event_queue_deduplicates_source_key(tmp_path: Path) -> None:
     assert event.payload == {"update_id": 123}
     await database.complete(event.id)
     assert await database.claim_next() is None
+
+
+async def test_runtime_state_roundtrip(tmp_path: Path) -> None:
+    database = Database(tmp_path / "state.db")
+    await database.initialize()
+
+    assert await database.get_state("cursor") is None
+    await database.set_state("cursor", "42")
+    assert await database.get_state("cursor") == "42"
+    await database.set_state("cursor", "43")
+    assert await database.get_state("cursor") == "43"

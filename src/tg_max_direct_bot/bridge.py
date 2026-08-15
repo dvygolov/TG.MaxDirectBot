@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Optional
 
 from .clients import ExternalAPIError, MaxClient, TelegramClient
 from .database import Database
@@ -14,7 +14,7 @@ class PermanentEventError(RuntimeError):
     """Ошибка формата события, повтор которой ничего не исправит."""
 
 
-@dataclass(slots=True)
+@dataclass
 class TelegramMedia:
     media_type: str
     file_id: str
@@ -81,7 +81,7 @@ def _split_for_max(header: str, body: str, limit: int = 4000) -> list[str]:
     return chunks
 
 
-def _max_reply_mid(message: dict[str, Any]) -> str | None:
+def _max_reply_mid(message: dict[str, Any]) -> Optional[str]:
     link = message.get("link") or {}
     if link.get("type") != "reply":
         return None
@@ -198,6 +198,12 @@ class Bridge:
                     self.operator_user_id,
                     "Бот готов. Ответьте в MAX на пересланное сообщение — ответ уйдёт "
                     "в соответствующий личный чат Telegram.",
+                )
+            else:
+                logger.warning(
+                    "MAX-бот запущен пользователем user_id=%s, но разрешён user_id=%s",
+                    user_id,
+                    self.operator_user_id,
                 )
             return
         if update_type != "message_created":

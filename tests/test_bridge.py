@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import pytest
 
@@ -42,8 +42,8 @@ class FakeMax:
     async def send_message(
         self,
         user_id: int,
-        text: str | None,
-        attachments: list[dict[str, Any]] | None = None,
+        text: Optional[str],
+        attachments: Optional[list[dict[str, Any]]] = None,
         *,
         notify: bool = True,
     ) -> dict[str, Any]:
@@ -63,7 +63,7 @@ class FakeMax:
 
     async def download_attachment(
         self, attachment: dict[str, Any], limit: int
-    ) -> tuple[bytes, str, str | None]:
+    ) -> tuple[bytes, str, Optional[str]]:
         return b"reply-image", "answer.jpg", "image/jpeg"
 
 

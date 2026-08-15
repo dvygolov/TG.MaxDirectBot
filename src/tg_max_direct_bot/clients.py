@@ -6,7 +6,7 @@ import mimetypes
 import ssl
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import httpx
 
@@ -34,10 +34,16 @@ class TelegramClient:
     async def close(self) -> None:
         await self.http.aclose()
 
-    async def _request(self, method: str, payload: dict[str, Any]) -> Any:
+    async def _request(
+        self,
+        method: str,
+        payload: dict[str, Any],
+        timeout: Optional[float] = None,
+    ) -> Any:
         url = f"{self.base_url}/bot{self.token}/{method}"
         try:
-            response = await self.http.post(url, json=payload)
+            request_timeout = timeout if timeout is not None else self.http.timeout
+            response = await self.http.post(url, json=payload, timeout=request_timeout)
         except httpx.RequestError:
             raise ExternalAPIError("сетевая ошибка Telegram API") from None
         if response.is_error:
@@ -72,6 +78,34 @@ class TelegramClient:
     async def get_webhook_info(self) -> dict[str, Any]:
         return await self._request("getWebhookInfo", {})
 
+    async def delete_webhook(self, drop_pending_updates: bool = False) -> bool:
+        return bool(
+            await self._request(
+                "deleteWebhook",
+                {"drop_pending_updates": drop_pending_updates},
+            )
+        )
+
+    async def get_updates(
+        self,
+        offset: Optional[int],
+        timeout_seconds: int,
+    ) -> list[dict[str, Any]]:
+        payload: dict[str, Any] = {
+            "timeout": timeout_seconds,
+            "allowed_updates": ["business_connection", "business_message"],
+        }
+        if offset is not None:
+            payload["offset"] = offset
+        result = await self._request(
+            "getUpdates",
+            payload,
+            timeout=max(float(timeout_seconds) + 15.0, 30.0),
+        )
+        if not isinstance(result, list):
+            return []
+        return [item for item in result if isinstance(item, dict)]
+
     async def send_text(
         self,
         *,
@@ -101,8 +135,8 @@ class TelegramClient:
         media_type: str,
         content: bytes,
         filename: str,
-        mime_type: str | None,
-        caption: str | None,
+        mime_type: Optional[str],
+        caption: Optional[str],
         reply_to_message_id: int,
     ) -> dict[str, Any]:
         methods = {
@@ -166,7 +200,7 @@ class MaxClient:
         token: str,
         base_url: str,
         timeout: float,
-        ca_file: Path | None = None,
+        ca_file: Optional[Path] = None,
     ) -> None:
         self.token = token
         self.base_url = base_url.rstrip("/")
@@ -191,15 +225,18 @@ class MaxClient:
         method: str,
         path: str,
         *,
-        params: dict[str, Any] | None = None,
-        payload: dict[str, Any] | None = None,
+        params: Optional[dict[str, Any]] = None,
+        payload: Optional[dict[str, Any]] = None,
+        timeout: Optional[float] = None,
     ) -> Any:
         try:
+            request_timeout = timeout if timeout is not None else self.http.timeout
             response = await self.http.request(
                 method,
                 f"{self.base_url}{path}",
                 params=params,
                 json=payload,
+                timeout=request_timeout,
             )
         except httpx.RequestError:
             raise ExternalAPIError("сетевая ошибка MAX API") from None
@@ -238,11 +275,51 @@ class MaxClient:
             },
         )
 
+    async def delete_all_subscriptions(self) -> int:
+        subscriptions = await self.list_subscriptions()
+        deleted = 0
+        for subscription in subscriptions:
+            url = subscription.get("url")
+            if isinstance(url, str) and url:
+                await self.delete_subscription(url)
+                deleted += 1
+        return deleted
+
+    async def get_updates(
+        self,
+        marker: Optional[int],
+        timeout_seconds: int,
+    ) -> tuple[list[dict[str, Any]], Optional[int]]:
+        params: dict[str, Any] = {
+            "timeout": timeout_seconds,
+            "types": "message_created,bot_started",
+        }
+        if marker is not None:
+            params["marker"] = marker
+        data = await self._request(
+            "GET",
+            "/updates",
+            params=params,
+            timeout=max(float(timeout_seconds) + 15.0, 30.0),
+        )
+        updates = data.get("updates") if isinstance(data, dict) else None
+        next_marker = data.get("marker") if isinstance(data, dict) else None
+        clean_updates = (
+            [item for item in updates if isinstance(item, dict)]
+            if isinstance(updates, list)
+            else []
+        )
+        try:
+            parsed_marker = int(next_marker) if next_marker is not None else None
+        except (TypeError, ValueError):
+            parsed_marker = None
+        return clean_updates, parsed_marker
+
     async def send_message(
         self,
         user_id: int,
-        text: str | None,
-        attachments: list[dict[str, Any]] | None = None,
+        text: Optional[str],
+        attachments: Optional[list[dict[str, Any]]] = None,
         *,
         notify: bool = True,
     ) -> dict[str, Any]:
@@ -293,7 +370,7 @@ class MaxClient:
 
     async def download_attachment(
         self, attachment: dict[str, Any], limit: int
-    ) -> tuple[bytes, str, str | None]:
+    ) -> tuple[bytes, str, Optional[str]]:
         payload = attachment.get("payload") or {}
         url = payload.get("url")
         if not url:

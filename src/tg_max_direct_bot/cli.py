@@ -86,6 +86,10 @@ def main() -> None:
         level=getattr(logging, settings.log_level.upper(), logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    # Telegram embeds the bot token in API URLs.  Never persist HTTP request
+    # URLs in logs because they would disclose that credential.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
     if args.command == "setup-webhooks":
         asyncio.run(setup_webhooks(settings))
     elif args.command == "run-polling":

@@ -23,6 +23,10 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         level=getattr(logging, settings.log_level.upper(), logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    # Telegram embeds the bot token in API URLs.  Keep HTTP client request logs
+    # out of application logs even when the bridge itself runs at INFO level.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
 
     database = Database(settings.database_path)
     telegram = TelegramClient(

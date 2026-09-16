@@ -200,6 +200,26 @@ async def test_downloads_and_forwards_voice_as_audio(
     assert max_client.sent[0]["attachments"][0]["type"] == "audio"
 
 
+async def test_downloads_and_forwards_video(
+    bridge: tuple[Bridge, Database, FakeTelegram, FakeMax],
+) -> None:
+    service, _, telegram, max_client = bridge
+    await service.handle_telegram(
+        {
+            "business_message": {
+                "business_connection_id": "connection-1",
+                "message_id": 60,
+                "from": {"id": 204, "first_name": "Ольга"},
+                "chat": {"id": 204, "type": "private"},
+                "video": {"file_id": "video-1", "file_name": "clip.mp4", "mime_type": "video/mp4"},
+            }
+        }
+    )
+
+    assert telegram.downloaded == ["video-1"]
+    assert max_client.sent[0]["attachments"][0]["type"] == "video"
+
+
 def test_sender_header_prefers_username() -> None:
     assert _sender_header({"first_name": "Илья", "username": "fesko_il"}, {"id": 201}) == (
         "📨 Илья (@fesko_il)\n\n"

@@ -238,7 +238,9 @@ def test_sender_header_prefers_username() -> None:
 
 def test_attachment_processing_errors_are_retryable() -> None:
     assert _attachment_not_ready(
-        ExternalAPIError("MAX API вернул HTTP 400: Key: errors.process.attachment.video.not.processed")
+        ExternalAPIError(
+            "MAX API вернул HTTP 400: Key: errors.process.attachment.video.not.processed"
+        )
     )
 
 

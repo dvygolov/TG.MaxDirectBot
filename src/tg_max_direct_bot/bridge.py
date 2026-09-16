@@ -26,6 +26,12 @@ def _full_name(user: dict[str, Any]) -> str:
     return " ".join(part for part in parts if part) or "Пользователь Telegram"
 
 
+def _sender_header(sender: dict[str, Any], chat: dict[str, Any]) -> str:
+    username = sender.get("username") or chat.get("username")
+    identity = f"@{username}" if username else f"TG ID: {chat['id']}"
+    return f"📨 {_full_name(sender)} ({identity})\n\n"
+
+
 def _telegram_media(message: dict[str, Any]) -> list[TelegramMedia]:
     if message.get("photo"):
         photo = message["photo"][-1]
@@ -150,8 +156,7 @@ class Bridge:
         if not message.get("message_id") or not chat.get("id"):
             raise PermanentEventError("у business_message нет идентификаторов")
 
-        username = f" (@{sender['username']})" if sender.get("username") else ""
-        header = f"📨 {_full_name(sender)}{username}\nTelegram ID: {chat['id']}\n\n"
+        header = _sender_header(sender, chat)
         text = str(message.get("text") or message.get("caption") or "")
         labels = _attachment_labels(message)
         if labels:

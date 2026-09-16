@@ -5,7 +5,7 @@ from typing import Any, Optional
 
 import pytest
 
-from tg_max_direct_bot.bridge import Bridge
+from tg_max_direct_bot.bridge import Bridge, _sender_header
 from tg_max_direct_bot.database import Database
 
 
@@ -124,6 +124,37 @@ async def test_forwards_incoming_telegram_and_saves_reply_mapping(
     assert target is not None
     assert target.chat_id == 200
     assert target.message_id == 55
+
+
+async def test_forwards_document_and_uses_tg_id_without_username(
+    bridge: tuple[Bridge, Database, FakeTelegram, FakeMax],
+) -> None:
+    service, _, _, max_client = bridge
+    await service.handle_telegram(
+        {
+            "business_message": {
+                "business_connection_id": "connection-1",
+                "message_id": 57,
+                "from": {"id": 201, "first_name": "Илья"},
+                "chat": {"id": 201, "first_name": "Илья", "type": "private"},
+                "document": {
+                    "file_id": "pdf-1",
+                    "file_name": "bill.pdf",
+                    "mime_type": "application/pdf",
+                },
+            }
+        }
+    )
+
+    assert "Илья (TG ID: 201)" in max_client.sent[0]["text"]
+    assert "Telegram ID:" not in max_client.sent[0]["text"]
+    assert max_client.sent[0]["attachments"][0]["type"] == "file"
+
+
+def test_sender_header_prefers_username() -> None:
+    assert _sender_header({"first_name": "Илья", "username": "fesko_il"}, {"id": 201}) == (
+        "📨 Илья (@fesko_il)\n\n"
+    )
 
 
 async def test_ignores_outgoing_business_account_message(

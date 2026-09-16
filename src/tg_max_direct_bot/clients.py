@@ -15,6 +15,11 @@ class ExternalAPIError(RuntimeError):
     pass
 
 
+def _attachment_not_ready(error: ExternalAPIError) -> bool:
+    text = str(error).lower()
+    return "attachment.not.ready" in text or "attachment.file.not.processed" in text
+
+
 def _safe_error(service: str, response: httpx.Response) -> ExternalAPIError:
     try:
         data = response.json()
@@ -332,7 +337,7 @@ class MaxClient:
                 "attachments": attachments or [],
                 "notify": notify,
             }
-            for attempt in range(4):
+            for attempt in range(5):
                 try:
                     data = await self._request(
                         "POST",
@@ -342,31 +347,38 @@ class MaxClient:
                     )
                     break
                 except ExternalAPIError as exc:
-                    if not attachments or "attachment.not.ready" not in str(exc) or attempt == 3:
+                    if not attachments or not _attachment_not_ready(exc) or attempt == 4:
                         raise
                     await asyncio.sleep(2**attempt)
             self._last_send_at = time.monotonic()
             return data.get("message", data)
 
     async def upload(self, media_type: str, content: bytes, filename: str) -> dict[str, Any]:
-        slot = await self._request("POST", "/uploads", params={"type": media_type})
-        upload_url = slot["url"]
         mime = mimetypes.guess_type(filename)[0] or "application/octet-stream"
-        try:
-            response = await self.media_http.post(
-                upload_url,
-                files={"data": (filename, content, mime)},
-            )
-        except httpx.RequestError:
-            raise ExternalAPIError("сетевая ошибка при загрузке файла в MAX") from None
-        if response.is_error:
-            raise _safe_error("MAX upload", response)
-        uploaded = response.json()
-        if not isinstance(uploaded, dict):
-            raise ExternalAPIError("MAX upload вернул неожиданный ответ")
-        if "token" not in uploaded and "token" in slot:
-            uploaded["token"] = slot["token"]
-        return {"type": media_type, "payload": uploaded}
+        for attempt in range(3):
+            slot = await self._request("POST", "/uploads", params={"type": media_type})
+            try:
+                response = await self.media_http.post(
+                    slot["url"],
+                    files={"data": (filename, content, mime)},
+                )
+            except httpx.RequestError:
+                raise ExternalAPIError("сетевая ошибка при загрузке файла в MAX") from None
+            if response.is_error:
+                raise _safe_error("MAX upload", response)
+            try:
+                uploaded = response.json()
+            except ValueError:
+                if attempt == 2:
+                    raise ExternalAPIError("MAX upload вернул не JSON") from None
+                await asyncio.sleep(2**attempt)
+                continue
+            if not isinstance(uploaded, dict):
+                raise ExternalAPIError("MAX upload вернул неожиданный ответ")
+            if "token" not in uploaded and "token" in slot:
+                uploaded["token"] = slot["token"]
+            return {"type": media_type, "payload": uploaded}
+        raise ExternalAPIError("MAX upload не завершился")
 
     async def download_attachment(
         self, attachment: dict[str, Any], limit: int

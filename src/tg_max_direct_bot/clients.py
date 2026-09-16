@@ -337,7 +337,7 @@ class MaxClient:
                 "attachments": attachments or [],
                 "notify": notify,
             }
-            for attempt in range(5):
+            for attempt in range(3):
                 try:
                     data = await self._request(
                         "POST",
@@ -347,7 +347,7 @@ class MaxClient:
                     )
                     break
                 except ExternalAPIError as exc:
-                    if not attachments or not _attachment_not_ready(exc) or attempt == 4:
+                    if not attachments or not _attachment_not_ready(exc) or attempt == 2:
                         raise
                     await asyncio.sleep(2**attempt)
             self._last_send_at = time.monotonic()

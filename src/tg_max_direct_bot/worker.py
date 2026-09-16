@@ -10,6 +10,7 @@ from .database import Database
 
 logger = logging.getLogger(__name__)
 WORKER_IDLE_TIMEOUT_SECONDS = 1.0
+MAX_EVENT_ATTEMPTS = 3
 
 
 class EventWorker:
@@ -59,6 +60,15 @@ class EventWorker:
                     event.event_key,
                     event.attempts,
                 )
-                await self.db.retry(event, str(exc))
+                if event.attempts >= MAX_EVENT_ATTEMPTS:
+                    logger.error(
+                        "Событие %s:%s окончательно пропущено после %s попыток",
+                        event.source,
+                        event.event_key,
+                        event.attempts,
+                    )
+                    await self.db.complete(event.id)
+                else:
+                    await self.db.retry(event, str(exc))
             else:
                 await self.db.complete(event.id)

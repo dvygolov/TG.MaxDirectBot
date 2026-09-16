@@ -95,6 +95,10 @@ def _max_reply_mid(message: dict[str, Any]) -> Optional[str]:
     return linked_body.get("mid")
 
 
+def _attachment_failure_note(names: list[str]) -> str:
+    return "\n\n⚠️ Не удалось загрузить вложение в MAX.\nИмя файла: " + ", ".join(names)
+
+
 class Bridge:
     def __init__(
         self,
@@ -164,6 +168,8 @@ class Bridge:
             text = f"{text}\n\n[{marker}]" if text else f"[{marker}]"
 
         attachments: list[dict[str, Any]] = []
+        attachment_names = [media.filename for media in _telegram_media(message)]
+        failed_attachment_names: list[str] = []
         for media in _telegram_media(message):
             try:
                 content, actual_path = await self.telegram.download_file(
@@ -173,17 +179,27 @@ class Bridge:
                 if filename.endswith(".bin") and "." in actual_path:
                     filename = actual_path.rsplit("/", 1)[-1]
                 attachments.append(await self.max.upload(media.media_type, content, filename))
-            except ExternalAPIError as exc:
+            except Exception as exc:
                 logger.warning("Не удалось перенести вложение Telegram в MAX: %s", exc)
-                text += "\n\n[Файл не перенесён: превышен лимит или формат не поддерживается]"
+                failed_attachment_names.append(media.filename)
+
+        if failed_attachment_names:
+            text += _attachment_failure_note(failed_attachment_names)
 
         chunks = _split_for_max(header, text)
         for index, chunk in enumerate(chunks):
-            sent = await self.max.send_message(
-                self.operator_user_id,
-                chunk,
-                attachments if index == 0 else None,
-            )
+            chunk_attachments = attachments if index == 0 else None
+            try:
+                sent = await self.max.send_message(
+                    self.operator_user_id,
+                    chunk,
+                    chunk_attachments,
+                )
+            except ExternalAPIError:
+                if not chunk_attachments:
+                    raise
+                fallback = chunk + _attachment_failure_note(attachment_names)
+                sent = await self.max.send_message(self.operator_user_id, fallback)
             mid = ((sent.get("body") or {}).get("mid")) if isinstance(sent, dict) else None
             if not mid:
                 raise ExternalAPIError("MAX API не вернул ID отправленного сообщения")
@@ -193,7 +209,6 @@ class Bridge:
                 int(chat["id"]),
                 int(message["message_id"]),
             )
-
     async def handle_max(self, update: dict[str, Any]) -> None:
         update_type = update.get("update_type")
         if update_type == "bot_started":

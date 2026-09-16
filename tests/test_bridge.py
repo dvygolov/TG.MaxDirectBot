@@ -6,6 +6,7 @@ from typing import Any, Optional
 import pytest
 
 from tg_max_direct_bot.bridge import Bridge, _sender_header
+from tg_max_direct_bot.clients import ExternalAPIError
 from tg_max_direct_bot.database import Database
 
 
@@ -13,6 +14,7 @@ class FakeTelegram:
     def __init__(self) -> None:
         self.sent_text: list[dict[str, Any]] = []
         self.sent_media: list[dict[str, Any]] = []
+        self.downloaded: list[str] = []
 
     async def get_business_connection(self, connection_id: str) -> dict[str, Any]:
         return {
@@ -31,6 +33,7 @@ class FakeTelegram:
         return {"message_id": 100}
 
     async def download_file(self, file_id: str, limit: int) -> tuple[bytes, str]:
+        self.downloaded.append(file_id)
         return b"image", "photos/file.jpg"
 
 
@@ -38,6 +41,7 @@ class FakeMax:
     def __init__(self) -> None:
         self.sent: list[dict[str, Any]] = []
         self.counter = 0
+        self.fail_upload = False
 
     async def send_message(
         self,
@@ -59,6 +63,8 @@ class FakeMax:
         return {"body": {"mid": f"max-{self.counter}"}}
 
     async def upload(self, media_type: str, content: bytes, filename: str) -> dict[str, Any]:
+        if self.fail_upload:
+            raise ExternalAPIError("MAX upload вернул не JSON")
         return {"type": media_type, "payload": {"token": "uploaded"}}
 
     async def download_attachment(
@@ -149,6 +155,49 @@ async def test_forwards_document_and_uses_tg_id_without_username(
     assert "Илья (TG ID: 201)" in max_client.sent[0]["text"]
     assert "Telegram ID:" not in max_client.sent[0]["text"]
     assert max_client.sent[0]["attachments"][0]["type"] == "file"
+
+
+async def test_reports_failed_attachment_with_filename(
+    bridge: tuple[Bridge, Database, FakeTelegram, FakeMax],
+) -> None:
+    service, _, _, max_client = bridge
+    max_client.fail_upload = True
+    await service.handle_telegram(
+        {
+            "business_message": {
+                "business_connection_id": "connection-1",
+                "message_id": 58,
+                "from": {"id": 202, "first_name": "Илья", "username": "fesko_il"},
+                "chat": {"id": 202, "type": "private"},
+                "text": "Посмотри счёт",
+                "document": {"file_id": "pdf-2", "file_name": "счёт.pdf"},
+            }
+        }
+    )
+
+    assert "Посмотри счёт" in max_client.sent[0]["text"]
+    assert "Имя файла: счёт.pdf" in max_client.sent[0]["text"]
+    assert max_client.sent[0]["attachments"] == []
+
+
+async def test_downloads_and_forwards_voice_as_audio(
+    bridge: tuple[Bridge, Database, FakeTelegram, FakeMax],
+) -> None:
+    service, _, telegram, max_client = bridge
+    await service.handle_telegram(
+        {
+            "business_message": {
+                "business_connection_id": "connection-1",
+                "message_id": 59,
+                "from": {"id": 203, "first_name": "Антон"},
+                "chat": {"id": 203, "type": "private"},
+                "voice": {"file_id": "voice-1", "duration": 4, "mime_type": "audio/ogg"},
+            }
+        }
+    )
+
+    assert telegram.downloaded == ["voice-1"]
+    assert max_client.sent[0]["attachments"][0]["type"] == "audio"
 
 
 def test_sender_header_prefers_username() -> None:

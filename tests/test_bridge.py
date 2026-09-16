@@ -5,6 +5,7 @@ from typing import Any, Optional
 
 import pytest
 
+from tg_max_direct_bot import bridge as bridge_module
 from tg_max_direct_bot.bridge import Bridge, _sender_header
 from tg_max_direct_bot.clients import ExternalAPIError
 from tg_max_direct_bot.database import Database
@@ -42,6 +43,7 @@ class FakeMax:
         self.sent: list[dict[str, Any]] = []
         self.counter = 0
         self.fail_upload = False
+        self.uploaded: list[tuple[str, str]] = []
 
     async def send_message(
         self,
@@ -65,6 +67,7 @@ class FakeMax:
     async def upload(self, media_type: str, content: bytes, filename: str) -> dict[str, Any]:
         if self.fail_upload:
             raise ExternalAPIError("MAX upload вернул не JSON")
+        self.uploaded.append((media_type, filename))
         return {"type": media_type, "payload": {"token": "uploaded"}}
 
     async def download_attachment(
@@ -182,8 +185,14 @@ async def test_reports_failed_attachment_with_filename(
 
 async def test_downloads_and_forwards_voice_as_audio(
     bridge: tuple[Bridge, Database, FakeTelegram, FakeMax],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service, _, telegram, max_client = bridge
+
+    async def fake_transcode(content: bytes, filename: str) -> tuple[bytes, str]:
+        return b"mp3", "voice.mp3"
+
+    monkeypatch.setattr(bridge_module, "_transcode_ogg", fake_transcode)
     await service.handle_telegram(
         {
             "business_message": {
@@ -198,6 +207,7 @@ async def test_downloads_and_forwards_voice_as_audio(
 
     assert telegram.downloaded == ["voice-1"]
     assert max_client.sent[0]["attachments"][0]["type"] == "audio"
+    assert max_client.uploaded == [("audio", "voice.mp3")]
 
 
 async def test_downloads_and_forwards_video(

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import logging
+import shutil
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -99,6 +101,38 @@ def _attachment_failure_note(names: list[str]) -> str:
     return "\n\n⚠️ Не удалось загрузить вложение в MAX.\nИмя файла: " + ", ".join(names)
 
 
+async def _transcode_ogg(content: bytes, filename: str) -> tuple[bytes, str]:
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise ExternalAPIError("ffmpeg не установлен на сервере")
+    stem = filename.rsplit(".", 1)[0] or "voice"
+    try:
+        process = await asyncio.create_subprocess_exec(
+            ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            "pipe:0",
+            "-f",
+            "mp3",
+            "-codec:a",
+            "libmp3lame",
+            "-q:a",
+            "4",
+            "pipe:1",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        converted, _ = await process.communicate(content)
+    except OSError as exc:
+        raise ExternalAPIError(f"не удалось запустить ffmpeg: {exc}") from None
+    if process.returncode or not converted:
+        raise ExternalAPIError("ffmpeg не смог перекодировать голосовое сообщение")
+    return converted, f"{stem}.mp3"
+
+
 class Bridge:
     def __init__(
         self,
@@ -168,9 +202,10 @@ class Bridge:
             text = f"{text}\n\n[{marker}]" if text else f"[{marker}]"
 
         attachments: list[dict[str, Any]] = []
-        attachment_names = [media.filename for media in _telegram_media(message)]
+        media_items = _telegram_media(message)
+        attachment_names = [media.filename for media in media_items]
         failed_attachment_names: list[str] = []
-        for media in _telegram_media(message):
+        for media in media_items:
             try:
                 content, actual_path = await self.telegram.download_file(
                     media.file_id, self.download_limit
@@ -178,6 +213,8 @@ class Bridge:
                 filename = media.filename
                 if filename.endswith(".bin") and "." in actual_path:
                     filename = actual_path.rsplit("/", 1)[-1]
+                if media.media_type == "audio" and filename.lower().endswith((".ogg", ".oga")):
+                    content, filename = await _transcode_ogg(content, filename)
                 attachments.append(await self.max.upload(media.media_type, content, filename))
             except Exception as exc:
                 logger.warning("Не удалось перенести вложение Telegram в MAX: %s", exc)

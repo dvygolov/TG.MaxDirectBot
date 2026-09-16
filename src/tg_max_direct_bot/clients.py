@@ -369,6 +369,8 @@ class MaxClient:
             try:
                 uploaded = response.json()
             except ValueError:
+                if slot.get("token") and b"<retval>1</retval>" in response.content:
+                    return {"type": media_type, "payload": {"token": slot["token"]}}
                 if attempt == 2:
                     raise ExternalAPIError("MAX upload вернул не JSON") from None
                 await asyncio.sleep(2**attempt)

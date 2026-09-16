@@ -17,7 +17,9 @@ class ExternalAPIError(RuntimeError):
 
 def _attachment_not_ready(error: ExternalAPIError) -> bool:
     text = str(error).lower()
-    return "attachment.not.ready" in text or "attachment.file.not.processed" in text
+    return "attachment.not.ready" in text or (
+        "attachment." in text and "not.processed" in text
+    )
 
 
 def _safe_error(service: str, response: httpx.Response) -> ExternalAPIError:
@@ -337,7 +339,7 @@ class MaxClient:
                 "attachments": attachments or [],
                 "notify": notify,
             }
-            for attempt in range(3):
+            for attempt in range(4):
                 try:
                     data = await self._request(
                         "POST",
@@ -347,9 +349,9 @@ class MaxClient:
                     )
                     break
                 except ExternalAPIError as exc:
-                    if not attachments or not _attachment_not_ready(exc) or attempt == 2:
+                    if not attachments or not _attachment_not_ready(exc) or attempt == 3:
                         raise
-                    await asyncio.sleep(2**attempt)
+                    await asyncio.sleep(2 ** (attempt + 1))
             self._last_send_at = time.monotonic()
             return data.get("message", data)
 

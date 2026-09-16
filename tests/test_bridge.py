@@ -7,7 +7,7 @@ import pytest
 
 from tg_max_direct_bot import bridge as bridge_module
 from tg_max_direct_bot.bridge import Bridge, _sender_header
-from tg_max_direct_bot.clients import ExternalAPIError
+from tg_max_direct_bot.clients import ExternalAPIError, _attachment_not_ready
 from tg_max_direct_bot.database import Database
 
 
@@ -233,6 +233,12 @@ async def test_downloads_and_forwards_video(
 def test_sender_header_prefers_username() -> None:
     assert _sender_header({"first_name": "Илья", "username": "fesko_il"}, {"id": 201}) == (
         "📨 Илья (@fesko_il)\n\n"
+    )
+
+
+def test_attachment_processing_errors_are_retryable() -> None:
+    assert _attachment_not_ready(
+        ExternalAPIError("MAX API вернул HTTP 400: Key: errors.process.attachment.video.not.processed")
     )
 
 
